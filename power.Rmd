@@ -1,0 +1,233 @@
+---
+title: "ADD power analysis v4"
+author: "Len Thomas, Alex Coram"
+date: "2023-April-13"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
+library(tidyverse)
+library(nlme)
+```
+
+## Power analysis
+
+# V4b
+
+Copy of V3 but without the code that removes zero depredation stocking periods
+
+```{r, fig.height=6, fig.width=6}
+
+rm(list = ls())
+
+dat <- read.csv("morts.csv", header = TRUE)
+dat$date <- lubridate::ymd(dat$date)
+dat <- dat %>% arrange(site, date)
+
+#Work out stocking number
+n.rows <- nrow(dat)
+stock <- 1
+week <- 1
+pair <- 1
+dat$stock[1] <- stock
+dat$week[1] <- week
+dat$pair[1] <- pair
+dat$ADD[1] <- FALSE
+dat$keep <- TRUE
+
+for(i in 2:n.rows){
+  if((!(dat$site[i] == dat$site[i-1])) | (dat$date[i] - dat$date[i - 1] > 7)) {
+    stock <- stock + 1
+    if(!(week %% 2 == 0)) dat$keep[i-1] <- FALSE 
+    week <- 0
+    pair <- 0    
+  }
+  week <- week + 1
+  if(week %% 2 == 1) pair <- pair + 1
+  dat$stock[i] <- stock
+  dat$week[i] <- week
+  dat$pair[i] <- pair
+  dat$ADD[i] <- (week %% 2 == 0)
+  }
+if(!(week %% 2 == 0)) dat$keep[i] <- FALSE
+dat <- dat[dat$keep == TRUE, ]
+
+# # Remove stocking periods with no observed mortality
+# stocks.with.mort <- dat %>%
+#   group_by(stock) %>%
+#   summarise(sum_morts = sum(n_morts)) %>%
+#   filter(sum_morts > 0) %>%
+#   select(stock)
+# 
+# dat <- dat[dat$stock %in% stocks.with.mort$stock, ]
+
+stocks <- unique(dat$stock)
+n.stocks <- length(stocks)
+
+#Run simulation
+E <- seq(0.1, 0.4, by = 0.05)
+n.E <- length(E)
+
+B <- 500
+n.to.sample <- c(10, 15, 20)
+n.S <- length(n.to.sample)
+
+res <- array(NA, c(B, n.E, n.S))
+
+for(s in 1:n.S){ 
+  for(b in 1:B){ 
+    samp.stocks <- sample(stocks, n.to.sample[s], replace = TRUE) 
+    new.dat <- dat[dat$stock == samp.stocks[1], ] 
+    new.dat$new.stock = 1 
+    for(i in 2:n.to.sample[s]){ 
+      new.dat <- rbind(new.dat, data.frame(dat[dat$stock == samp.stocks[i], ], new.stock = i))
+    }
+    for(j in 1:n.E){
+      new.dat$n_morts2 <- new.dat$n_morts
+      new.dat$n_morts2[new.dat$ADD] <- rbinom(sum(new.dat$ADD), round(new.dat$n_morts[new.dat$ADD]), 1 - E[j])
+      new.dat$p_morts2 <- new.dat$n_morts2 / new.dat$n_fish
+      x <- lme (fixed = p_morts2 ~ ADD, random = ~ 1 | stock / pair, data = new.dat)
+      res[b, j, s] <- summary(x)$tTable[2, 5]
+    }
+  }
+}
+
+alpha <- 0.05
+is.signif <- function(x, alpha) {return(mean(x <= alpha))}
+
+power <- apply(res, c(2, 3), is.signif, alpha)
+save.image(file = "power_v4.rdata")
+
+
+# And this produces a plot of the results.
+
+pdf(file = "power_v4b.pdf", width = 7, heigh = 5)
+plot(E, rep(0, n.E), type = "n", xlab = "Proportional reduction in mortality", ylab = "Power", ylim = c(0, 1))
+for(i in 1:n.S){
+  lines(E, power[, i], lty = i)
+}  
+abline(h = 0.8, lty = 2, col = "red")
+legend("bottomright", legend = n.to.sample, lty = 1:n.S, title = "# sites")
+dev.off()
+```
+
+# V4c
+
+This version labels pairs of weeks according to whether depredation has occurred in that stocking period. These weeks are removed inside the power analysis loop so that the sample size is not biased.
+
+```{r, fig.height=6, fig.width=6}
+
+rm(list = ls())
+
+dat <- read.csv("shetland_morts.csv", header = TRUE)
+dat$date <- lubridate::ymd(dat$date)
+dat <- dat %>% arrange(site, date)
+
+#Work out stocking number
+n.rows <- nrow(dat)
+stock <- 1
+week <- 1
+pair <- 1
+dat$stock[1] <- stock
+dat$week[1] <- week
+dat$pair[1] <- pair
+dat$ADD[1] <- FALSE
+dat$keep <- TRUE
+dat$pred <- FALSE # AC: added this to label weeks after depredation has started
+
+for(i in 2:n.rows){
+  if((!(dat$site[i] == dat$site[i-1])) | (dat$date[i] - dat$date[i - 1] > 7)) {
+    stock <- stock + 1
+    if(!(week %% 2 == 0)) dat$keep[i-1] <- FALSE 
+    week <- 0
+    pair <- 0    
+  }
+  week <- week + 1
+  if(week %% 2 == 1) pair <- pair + 1
+  dat$stock[i] <- stock
+  dat$week[i] <- week
+  dat$pair[i] <- pair
+  dat$ADD[i] <- (week %% 2 == 0)
+  ## AC: This bit added...
+  # add a column to show whether there has been depredation yet in this stocking period (i.e. whether an adaptive trial will have started)
+  if(dat$n_morts[i] > 0) {dat$pred[i] <- TRUE}
+  else {
+    if(dat$stock[i] == dat$stock[i-1]) {dat$pred[i] <- dat$pred[i-1]}
+  }
+}
+if(!(week %% 2 == 0)) dat$keep[i] <- FALSE
+dat <- dat[dat$keep == TRUE, ] #Remove the last record on stocking periods with an odd number of weeks
+
+# # Remove stocking periods with no observed mortality
+# stocks.with.mort <- dat %>%
+#   group_by(stock) %>%
+#   summarise(sum_morts = sum(n_morts)) %>%
+#   filter(sum_morts > 0) %>%
+#   select(stock)
+# 
+# dat <- dat[dat$stock %in% stocks.with.mort$stock, ]
+
+# select pairs to keep, based on whether depredation has occurred yet
+pairs.with.pred <- dat |> 
+  group_by(stock, pair) |> 
+  summarise(pair_pred = any(pred)) |> 
+  filter(pair_pred == TRUE) |> 
+  select(stock, pair)
+
+# add this as a label to the pair
+dat$pred <- interaction(dat$stock, dat$pair) %in% interaction(pairs.with.pred$stock, pairs.with.pred$pair)
+
+stocks <- unique(dat$stock)
+n.stocks <- length(stocks)
+
+#Run simulation
+E <- seq(0.1, 0.4, by = 0.05)
+n.E <- length(E)
+
+B <- 500
+n.to.sample <- c(10, 15, 20)
+n.S <- length(n.to.sample)
+
+res <- array(NA, c(B, n.E, n.S))
+
+for(s in 1:n.S){ 
+  for(b in 1:B){ 
+    samp.stocks <- sample(stocks, n.to.sample[s], replace = TRUE) # take 10, 15 or 20 samples from 'stocks'
+    new.dat <- dat[dat$stock == samp.stocks[1], ] # put the first stocking number from 'samp.stocks' into new.dat
+    new.dat$new.stock = 1 
+    for(i in 2:n.to.sample[s]){ # make the new dataset by adding stocking periods, selected in samp.stocks, to new.dat
+      new.dat <- rbind(new.dat, data.frame(dat[dat$stock == samp.stocks[i], ], new.stock = i))
+    }
+    new.dat <- new.dat[new.dat$pred == TRUE, ] # AC: added this to remove the weeks we don't want for each iteration
+    for(j in 1:n.E){
+      new.dat$n_morts2 <- new.dat$n_morts
+      new.dat$n_morts2[new.dat$ADD] <- rbinom(sum(new.dat$ADD), round(new.dat$n_morts[new.dat$ADD]), 1 - E[j])
+      new.dat$p_morts2 <- new.dat$n_morts2 / new.dat$n_fish
+      x <- lme (fixed = p_morts2 ~ ADD, random = ~ 1 | stock / pair, data = new.dat)
+      res[b, j, s] <- summary(x)$tTable[2, 5]
+    }
+  }
+}
+
+alpha <- 0.05
+is.signif <- function(x, alpha) {return(mean(x <= alpha))}
+
+power <- apply(res, c(2, 3), is.signif, alpha)
+save.image(file = "power_v4.rdata")
+
+
+# And this produces a plot of the results.
+
+pdf(file = "power_v4c.pdf", width = 7, heigh = 5)
+plot(E, rep(0, n.E), type = "n", xlab = "Proportional reduction in mortality", ylab = "Power", ylim = c(0, 1))
+for(i in 1:n.S){
+  lines(E, power[, i], lty = i)
+}  
+abline(h = 0.8, lty = 2, col = "red")
+legend("bottomright", legend = n.to.sample, lty = 1:n.S, title = "# sites")
+dev.off()
+```
